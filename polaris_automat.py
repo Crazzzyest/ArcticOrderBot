@@ -320,7 +320,39 @@ def open_innkjopsportal(driver: webdriver.Chrome) -> None:
         raise
 
 
-def search_and_add_item(driver: webdriver.Chrome, order: Dict[str, object]) -> None:
+def _verify_item_in_cart(driver: webdriver.Chrome, varenr: str, *, timeout_s: int = 20) -> bool:
+    """
+    Best-effort verifisering:
+    - prøver å åpne handlekurv/cart
+    - sjekker at varenummer finnes i DOM
+    """
+    wait = WebDriverWait(driver, timeout_s)
+
+    # 1) Prøv å klikke en cart/handlekurv-lenke/knapp
+    cart_click_xpaths = [
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÆØÅ', 'abcdefghijklmnopqrstuvwxyzæøå'), 'handlekurv')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'cart')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÆØÅ', 'abcdefghijklmnopqrstuvwxyzæøå'), 'handlekurv')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'cart')]",
+        "//*[@data-test-selector='cartIconButton']",
+    ]
+    for xp in cart_click_xpaths:
+        try:
+            el = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, xp)))
+            el.click()
+            break
+        except TimeoutException:
+            continue
+
+    # 2) Uansett: vent litt på at noe cart-relatert vises, og sjekk varenr
+    try:
+        wait.until(lambda d: varenr in (d.page_source or ""))
+        return True
+    except TimeoutException:
+        return False
+
+
+def search_and_add_item(driver: webdriver.Chrome, order: Dict[str, object]) -> bool:
     """Søker opp varenummer, fyller antall og legger i handlekurv."""
     varenr = str(order.get("varenr", "")).strip()
     antall = int(order.get("antall", 0))
@@ -328,7 +360,7 @@ def search_and_add_item(driver: webdriver.Chrome, order: Dict[str, object]) -> N
 
     if not varenr or antall <= 0:
         print(f"Hopper over ordre med ugyldige data: {order}")
-        return
+        return False
 
     print(f"Behandler vare '{varenr}' (leverandør: {leverandor}, antall: {antall})...")
 
@@ -361,7 +393,7 @@ def search_and_add_item(driver: webdriver.Chrome, order: Dict[str, object]) -> N
             )
         except TimeoutException:
             print("Fant ikke søkefeltet for varenummer. Juster XPath-lokatoren i search_and_add_item().")
-            return
+            return False
 
     search_input.clear()
     search_input.send_keys(varenr)
@@ -393,7 +425,7 @@ def search_and_add_item(driver: webdriver.Chrome, order: Dict[str, object]) -> N
             )
         except TimeoutException:
             print(f"Fant ikke QTY-felt for varenummer {varenr}.")
-            return
+            return False
 
     qty_input.clear()
     qty_input.send_keys(str(antall))
@@ -421,11 +453,20 @@ def search_and_add_item(driver: webdriver.Chrome, order: Dict[str, object]) -> N
         add_to_cart_button.click()
     except TimeoutException:
         print(f"Fant ikke 'Add to Cart'-knappen for varenummer {varenr}.")
-        return
+        return False
 
     handle_sales_order_class_dialog(driver)
 
-    print(f"Vare {varenr} lagt til i handlekurv (forsøkt).")
+    # Viktig i headless/CI: verifiser at varen faktisk dukket opp i cart/DOM
+    strict_verify = os.getenv("STRICT_CART_VERIFY", "1").strip().lower() not in {"0", "false", "no"}
+    ok = _verify_item_in_cart(driver, varenr, timeout_s=20)
+    if ok:
+        print(f"Vare {varenr} bekreftet i handlekurv.")
+        return True
+    if strict_verify:
+        raise RuntimeError(f"Polaris: klarte ikke verifisere {varenr} i handlekurv etter add-to-cart.")
+    print(f"Vare {varenr} lagt til i handlekurv (forsøkt), men ikke verifisert.")
+    return False
 
 
 def handle_sales_order_class_dialog(driver: webdriver.Chrome) -> None:
@@ -492,11 +533,18 @@ def process_orders(driver: webdriver.Chrome, orders: List[Dict[str, object]]) ->
         print("Ingen ordre å prosessere (tom liste).")
         return
 
+    failures = 0
     for order in orders:
         try:
-            search_and_add_item(driver, order)
+            ok = search_and_add_item(driver, order)
+            if not ok:
+                failures += 1
         except Exception as exc:  # noqa: BLE001
             print(f"Feil under behandling av ordre {order}: {exc}")
+            failures += 1
+
+    if failures:
+        raise RuntimeError(f"Polaris: {failures} ordrelinje(r) feilet eller ble ikke verifisert.")
 
 
 def run_polaris(orders: List[Dict[str, object]], *, interactive: bool = False) -> None:
