@@ -28,6 +28,11 @@ def create_driver() -> webdriver.Chrome:
     """Initialiserer Chrome WebDriver med fornuftige standarder."""
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
+    # Stabilitet i Linux-container (Sliplane/Docker)
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
     if os.getenv("HEADLESS", "").strip() in {"1", "true", "True", "yes", "YES"}:
         options.add_argument("--headless=new")
 
