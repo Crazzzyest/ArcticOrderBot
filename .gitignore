@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets / local config
+.env
+client_secret*.json
+
+# Sample documents / attachments (often contain PII)
+*.pdf
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Runtime artifacts
+/tmp/
+ordrebot_work/
