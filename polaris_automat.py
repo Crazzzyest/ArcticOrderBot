@@ -328,23 +328,44 @@ def _verify_item_in_cart(driver: webdriver.Chrome, varenr: str, *, timeout_s: in
     """
     wait = WebDriverWait(driver, timeout_s)
 
-    # 1) Prøv å klikke en cart/handlekurv-lenke/knapp
-    cart_click_xpaths = [
-        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÆØÅ', 'abcdefghijklmnopqrstuvwxyzæøå'), 'handlekurv')]",
-        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'cart')]",
-        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÆØÅ', 'abcdefghijklmnopqrstuvwxyzæøå'), 'handlekurv')]",
-        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'cart')]",
-        "//*[@data-test-selector='cartIconButton']",
-    ]
-    for xp in cart_click_xpaths:
+    # 1) Klikk cart-lenken (stabil lokator fra HTML)
+    try:
+        cart_link = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "a[data-test-selector='cartLink']")),
+        )
+        cart_link.click()
+    except TimeoutException:
+        # Fallback: href="/Cart"
         try:
-            el = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, xp)))
-            el.click()
-            break
+            cart_link = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, "//a[@href='/Cart' or contains(@href, '/Cart')]")),
+            )
+            cart_link.click()
         except TimeoutException:
-            continue
+            pass
 
-    # 2) Uansett: vent litt på at noe cart-relatert vises, og sjekk varenr
+    # 2) Vent på at vi er på cart-siden (best effort)
+    try:
+        WebDriverWait(driver, 10).until(lambda d: "/Cart" in (d.current_url or "") or "/cart" in (d.current_url or ""))
+    except TimeoutException:
+        pass
+
+    # 3) Verifiser enten at cart-quantity er > 0, eller at varenr finnes i DOM
+    try:
+        qty_el = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "[data-test-selector='cartLinkQuantity']")),
+        )
+        qty_text = (qty_el.text or "").strip()
+        if qty_text.isdigit() and int(qty_text) > 0:
+            # Ekstra sikkerhet: prøv også å finne varenummeret på cart-siden
+            try:
+                WebDriverWait(driver, 5).until(lambda d: varenr in (d.page_source or ""))
+            except TimeoutException:
+                pass
+            return True
+    except TimeoutException:
+        pass
+
     try:
         wait.until(lambda d: varenr in (d.page_source or ""))
         return True
