@@ -78,14 +78,19 @@ def parse_order_pdf(path: str | Path, *, leverandor_hint: Optional[str] = None) 
 
     relevant = _extract_relevant_text(full_text)
 
-    # - part: enten alfanumerisk som starter med bokstav (B0427), eller lange digit-strenger (00050000068)
-    part_pattern = r"(?:[A-Z][A-Z0-9\\-]{2,20}|\d{5,20})"
+    # - part: alfanumerisk som starter med bokstav (B0427), lange digit-strenger
+    #   (00050000068), eller varenr med bindestrek-suffiks (5456441-266).
+    part_pattern = r"(?:[A-Z][A-Z0-9]{1,20}(?:-[A-Z0-9]+)*|\d{4,20}(?:-[A-Z0-9]+)*)"
+
+    # Enhet: hvitliste så vi ikke forveksler forkortelser i beskrivelsen
+    # (f.eks. "13.91 CD" i produktnavn) med faktisk enhet.
+    unit_pattern = r"(?:[Ss]tk|[Pp]cs|[Ss]t|[Ee]a|[Kk]g|[Ll]|[Mm]|[Cc]m|[Mm]m|[Pp]k|[Pp]ar)"
 
     # Primær: tabellrad-heuristikk (som i ordre.pdf):
     # <part> <beskrivelse ...> <qty med desimal> <enhet> ...
     # Eksempel: "B0427 WINCH ... 1,00 Stk 2 975,00 ..."
     row_rx = re.compile(
-        rf"^(?P<part>{part_pattern})\s+.*?\s+(?P<qty>\d+[\.,]\d+)\s+(?P<unit>[A-Za-zÆØÅæøå]{{2,10}})\b",
+        rf"^(?P<part>{part_pattern})\s+.*?\s+(?P<qty>\d+[\.,]\d+)\s+(?P<unit>{unit_pattern})\b",
         re.MULTILINE,
     )
 
