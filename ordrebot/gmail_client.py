@@ -1,6 +1,7 @@
 import base64
 import os
 from dataclasses import dataclass
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -18,6 +19,7 @@ class GmailConfig:
     user_id: str = "me"
     query: str = "has:attachment filename:pdf"
     processed_label: str = "processed-afki"
+    error_label: str = "ordrebot-feil"
 
 
 def _env(name: str) -> str:
@@ -59,11 +61,14 @@ def build_gmail_service(creds: Credentials):
 
 
 def search_messages(service, config: GmailConfig, *, max_results: int = 20) -> List[str]:
+    exclusions = f"-label:{config.processed_label}"
+    if config.error_label:
+        exclusions += f" -label:{config.error_label}"
     try:
         resp = (
             service.users()
             .messages()
-            .list(userId=config.user_id, q=f"{config.query} -label:{config.processed_label}", maxResults=max_results)
+            .list(userId=config.user_id, q=f"{config.query} {exclusions}", maxResults=max_results)
             .execute()
         )
     except HttpError as e:
@@ -73,18 +78,19 @@ def search_messages(service, config: GmailConfig, *, max_results: int = 20) -> L
     return [m["id"] for m in msgs if "id" in m]
 
 
-def ensure_label(service, config: GmailConfig) -> str:
-    """Return labelId for processed label; create if missing."""
+def ensure_label(service, config: GmailConfig, name: Optional[str] = None) -> str:
+    """Returner labelId for `name` (default: config.processed_label); opprett hvis den mangler."""
+    label_name = name or config.processed_label
     try:
         labels_resp = service.users().labels().list(userId=config.user_id).execute()
     except HttpError as e:
         raise RuntimeError(f"Gmail labels list failed: {e}") from e
 
     for lbl in labels_resp.get("labels", []) or []:
-        if lbl.get("name") == config.processed_label:
+        if lbl.get("name") == label_name:
             return lbl["id"]
 
-    body = {"name": config.processed_label, "labelListVisibility": "labelShow", "messageListVisibility": "show"}
+    body = {"name": label_name, "labelListVisibility": "labelShow", "messageListVisibility": "show"}
     try:
         created = service.users().labels().create(userId=config.user_id, body=body).execute()
     except HttpError as e:
@@ -98,6 +104,66 @@ def apply_label(service, config: GmailConfig, message_id: str, label_id: str) ->
         service.users().messages().modify(userId=config.user_id, id=message_id, body=body).execute()
     except HttpError as e:
         raise RuntimeError(f"Gmail modify message failed: {e}") from e
+
+
+def _get_header(headers: Iterable[dict], name: str) -> str:
+    for h in headers:
+        if (h.get("name") or "").lower() == name.lower():
+            return h.get("value") or ""
+    return ""
+
+
+def reply_to_message(service, config: GmailConfig, message_id: str, body_text: str) -> None:
+    """
+    Svarer i samme tråd som den opprinnelige meldingen. Avsender blir den
+    autentiserte Gmail-brukeren; mottaker settes fra `From`-headeren på
+    originalen, og `In-Reply-To`/`References` gjør at svaret threades
+    korrekt i Gmail-klienten.
+    """
+    try:
+        msg = (
+            service.users()
+            .messages()
+            .get(
+                userId=config.user_id,
+                id=message_id,
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Message-ID", "References"],
+            )
+            .execute()
+        )
+    except HttpError as e:
+        raise RuntimeError(f"Gmail get message (for reply) failed: {e}") from e
+
+    headers = (msg.get("payload") or {}).get("headers", []) or []
+    from_addr = _get_header(headers, "From")
+    subject = _get_header(headers, "Subject") or "(uten emne)"
+    original_msg_id = _get_header(headers, "Message-ID") or _get_header(headers, "Message-Id")
+    references = _get_header(headers, "References")
+    thread_id = msg.get("threadId")
+
+    if not from_addr:
+        raise RuntimeError(f"Fant ikke From-header på melding {message_id}; kan ikke svare.")
+
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+
+    mime = MIMEText(body_text, _charset="utf-8")
+    mime["To"] = from_addr
+    mime["Subject"] = subject
+    if original_msg_id:
+        mime["In-Reply-To"] = original_msg_id
+        mime["References"] = f"{references} {original_msg_id}".strip() if references else original_msg_id
+
+    raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("utf-8")
+    send_body = {"raw": raw}
+    if thread_id:
+        send_body["threadId"] = thread_id
+
+    try:
+        service.users().messages().send(userId=config.user_id, body=send_body).execute()
+    except HttpError as e:
+        raise RuntimeError(f"Gmail send reply failed: {e}") from e
 
 
 def download_pdf_attachments(service, config: GmailConfig, message_id: str, download_dir: str | Path) -> List[Path]:
