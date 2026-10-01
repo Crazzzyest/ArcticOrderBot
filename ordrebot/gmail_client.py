@@ -13,6 +13,15 @@ from google.auth.transport.requests import Request
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
+# Gmail/NAT closes idle keep-alive sockets (e.g. while Chrome runs vendor
+# orders), so the next request can fail with BrokenPipeError. googleapiclient
+# only retries such connection errors when num_retries > 0.
+_RETRIES = 3
+
+
+def _execute(request, *, retries: int = _RETRIES):
+    return request.execute(num_retries=retries)
+
 
 @dataclass(frozen=True)
 class GmailConfig:
@@ -65,11 +74,10 @@ def search_messages(service, config: GmailConfig, *, max_results: int = 20) -> L
     if config.error_label:
         exclusions += f" -label:{config.error_label}"
     try:
-        resp = (
+        resp = _execute(
             service.users()
             .messages()
             .list(userId=config.user_id, q=f"{config.query} {exclusions}", maxResults=max_results)
-            .execute()
         )
     except HttpError as e:
         raise RuntimeError(f"Gmail list failed: {e}") from e
@@ -82,7 +90,7 @@ def ensure_label(service, config: GmailConfig, name: Optional[str] = None) -> st
     """Returner labelId for `name` (default: config.processed_label); opprett hvis den mangler."""
     label_name = name or config.processed_label
     try:
-        labels_resp = service.users().labels().list(userId=config.user_id).execute()
+        labels_resp = _execute(service.users().labels().list(userId=config.user_id))
     except HttpError as e:
         raise RuntimeError(f"Gmail labels list failed: {e}") from e
 
@@ -92,7 +100,7 @@ def ensure_label(service, config: GmailConfig, name: Optional[str] = None) -> st
 
     body = {"name": label_name, "labelListVisibility": "labelShow", "messageListVisibility": "show"}
     try:
-        created = service.users().labels().create(userId=config.user_id, body=body).execute()
+        created = _execute(service.users().labels().create(userId=config.user_id, body=body))
     except HttpError as e:
         raise RuntimeError(f"Gmail create label failed: {e}") from e
     return created["id"]
@@ -101,7 +109,7 @@ def ensure_label(service, config: GmailConfig, name: Optional[str] = None) -> st
 def apply_label(service, config: GmailConfig, message_id: str, label_id: str) -> None:
     body = {"addLabelIds": [label_id], "removeLabelIds": []}
     try:
-        service.users().messages().modify(userId=config.user_id, id=message_id, body=body).execute()
+        _execute(service.users().messages().modify(userId=config.user_id, id=message_id, body=body))
     except HttpError as e:
         raise RuntimeError(f"Gmail modify message failed: {e}") from e
 
@@ -121,7 +129,7 @@ def reply_to_message(service, config: GmailConfig, message_id: str, body_text: s
     korrekt i Gmail-klienten.
     """
     try:
-        msg = (
+        msg = _execute(
             service.users()
             .messages()
             .get(
@@ -130,7 +138,6 @@ def reply_to_message(service, config: GmailConfig, message_id: str, body_text: s
                 format="metadata",
                 metadataHeaders=["From", "Subject", "Message-ID", "References"],
             )
-            .execute()
         )
     except HttpError as e:
         raise RuntimeError(f"Gmail get message (for reply) failed: {e}") from e
@@ -161,7 +168,7 @@ def reply_to_message(service, config: GmailConfig, message_id: str, body_text: s
         send_body["threadId"] = thread_id
 
     try:
-        service.users().messages().send(userId=config.user_id, body=send_body).execute()
+        _execute(service.users().messages().send(userId=config.user_id, body=send_body), retries=0)
     except HttpError as e:
         raise RuntimeError(f"Gmail send reply failed: {e}") from e
 
@@ -175,7 +182,7 @@ def download_pdf_attachments(service, config: GmailConfig, message_id: str, down
     download_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        msg = service.users().messages().get(userId=config.user_id, id=message_id, format="full").execute()
+        msg = _execute(service.users().messages().get(userId=config.user_id, id=message_id, format="full"))
     except HttpError as e:
         raise RuntimeError(f"Gmail get message failed: {e}") from e
 
@@ -202,12 +209,11 @@ def download_pdf_attachments(service, config: GmailConfig, message_id: str, down
             continue
 
         try:
-            att = (
+            att = _execute(
                 service.users()
                 .messages()
                 .attachments()
                 .get(userId=config.user_id, messageId=message_id, id=att_id)
-                .execute()
             )
         except HttpError as e:
             raise RuntimeError(f"Gmail get attachment failed: {e}") from e

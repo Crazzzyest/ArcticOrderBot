@@ -116,7 +116,15 @@ def main() -> None:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     while True:
-        message_ids = search_messages(service, config, max_results=max_per_poll)
+        try:
+            message_ids = search_messages(service, config, max_results=max_per_poll)
+        except Exception as exc:  # noqa: BLE001
+            # Forbigående nettverksfeil (f.eks. BrokenPipe) skal ikke felle prosessen.
+            if once:
+                raise
+            print(f"Feil ved søk i Gmail, prøver igjen om {poll_interval_s}s: {exc!r}")
+            time.sleep(poll_interval_s)
+            continue
         if not message_ids:
             print("Ingen nye e-poster å prosessere.")
         for mid in message_ids:
